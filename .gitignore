@@ -1,0 +1,57 @@
+# Gradle
+.gradle/
+build/
+**/build/
+
+# Local config
+local.properties
+
+# IntelliJ / Android Studio
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+
+# Android
+/captures/
+.externalNativeBuild/
+.cxx/
+app/build/
+
+# Generated files
+build/generated/
+build/intermediates/
+
+# Packaging
+*.apk
+*.ap_
+*.aab
+
+# NDK
+obj/
+*.so
+
+# Kotlin/Java
+*.class
+*.jar
+*.war
+*.ear
+
+# Signing
+*.jks
+*.keystore
+signing-key.properties
+
+# IDE
+.vscode/
+
+# macOS
+.DS_Store
+
+# Temp files
+tmp/
+*.tmp
+*.log
+*.cache
+.caches/
