@@ -1,0 +1,41 @@
+name: Build
+
+on:
+  push:
+    branches: [main] # merged PRs land here
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # Valide aussi gradle-wrapper.jar (checksum) et met en cache ~/.gradle.
+      - uses: gradle/actions/setup-gradle@v4
+
+      # Android SDK preinstalle sur ubuntu-latest ($ANDROID_HOME), licences deja acceptees.
+      - name: Assemble debug APK
+        run: ./gradlew --no-daemon assembleDebug
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: netspeed-debug-${{ github.sha }}
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 30
