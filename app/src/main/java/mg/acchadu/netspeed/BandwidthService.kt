@@ -1,5 +1,6 @@
 package mg.acchadu.netspeed
 
+import android.app.ActivityManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -7,48 +8,61 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.PixelFormat
+import android.graphics.Paint
 import android.graphics.Typeface
-import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.Icon
 import android.net.TrafficStats
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.os.SystemClock
-import android.provider.Settings
-import android.util.TypedValue
-import android.view.Gravity
-import android.view.WindowManager
-import android.widget.TextView
-import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import java.util.Locale
+import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 
 /**
- * Service sans UI d'application : echantillonne TrafficStats et rend le debit
- * dans une fenetre overlay (TYPE_APPLICATION_OVERLAY).
+ * Service sans UI d'application : echantillonne TrafficStats + la RAM et rend les valeurs
+ * dans la barre d'etat, sous forme d'icones de notification generees a la volee
+ * (Icon.createWithBitmap). Deux notifications, donc deux icones :
+ *  - debit (notification du foreground service) : total ↓+↑, detail dans le panneau,
+ *  - RAM : pourcentage utilise, detail dans le panneau.
+ * Chacune a son propre canal, desactivable independamment dans les reglages.
  *
  * TrafficStats.getTotalRxBytes()/getTotalTxBytes() = compteurs cumules depuis le boot,
  * toutes interfaces confondues (mobile + wifi + usb tethering), loopback exclu.
  * Contrairement aux compteurs per-UID, ils restent lisibles sans permission sur
- * Android 7+.
+ * Android 7+. ActivityManager.getMemoryInfo() ne demande pas de permission non plus.
  */
 class BandwidthService : Service() {
 
-    private lateinit var windowManager: WindowManager
-    private var overlay: TextView? = null
+    private lateinit var nm: NotificationManager
+    private lateinit var am: ActivityManager
+    private lateinit var pm: PowerManager
     private val handler = Handler(Looper.getMainLooper())
+    private val memInfo = ActivityManager.MemoryInfo()
 
     private var lastRx = 0L
     private var lastTx = 0L
     private var lastTs = 0L
+    private var running = false
+
+    private val iconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE // seul l'alpha compte : le systeme teinte l'icone
+        textAlign = Paint.Align.CENTER
+        typeface = Typeface.create("sans-serif-condensed", Typeface.BOLD)
+    }
 
     private val tick = object : Runnable {
         override fun run() {
-            sample()
+            // Ecran eteint : rien n'est visible, on ne poste pas de notification.
+            // On recale les compteurs pour que le premier echantillon au reveil soit juste.
+            if (pm.isInteractive) sample() else resetCounters()
             handler.postDelayed(this, INTERVAL_MS)
         }
     }
@@ -57,7 +71,10 @@ class BandwidthService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        nm = getSystemService(NotificationManager::class.java)
+        am = getSystemService(ActivityManager::class.java)
+        pm = getSystemService(PowerManager::class.java)
+        createChannels()
         goForeground()
     }
 
@@ -66,10 +83,9 @@ class BandwidthService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        if (overlay == null && Settings.canDrawOverlays(this)) {
-            attachOverlay()
+        if (!running) {
+            running = true
             resetCounters()
-            handler.removeCallbacks(tick)
             handler.postDelayed(tick, INTERVAL_MS)
         }
         return START_STICKY
@@ -77,89 +93,99 @@ class BandwidthService : Service() {
 
     override fun onDestroy() {
         handler.removeCallbacks(tick)
-        overlay?.let { runCatching { windowManager.removeView(it) } }
-        overlay = null
+        running = false
+        nm.cancel(NOTIF_RAM_ID)
         super.onDestroy()
     }
 
-    // --- Foreground ---------------------------------------------------------
+    // --- Notifications ------------------------------------------------------
 
-    private fun goForeground() {
-        val nm = getSystemService(NotificationManager::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val ch = NotificationChannel(
-                CHANNEL_ID,
-                "Moniteur de debit",
-                NotificationManager.IMPORTANCE_MIN // pas de son, pas de heads-up, section silencieuse
-            ).apply {
-                setShowBadge(false)
-                lockscreenVisibility = Notification.VISIBILITY_SECRET
-            }
-            nm.createNotificationChannel(ch)
+    private fun createChannels() {
+        // Ancien canal v1 en IMPORTANCE_MIN : pas d'icone en barre d'etat. L'importance d'un
+        // canal existant ne peut pas etre relevee par l'app, d'ou de nouveaux IDs.
+        nm.deleteNotificationChannel(LEGACY_CHANNEL_ID)
+        // IMPORTANCE_LOW = minimum pour avoir une icone dans la barre d'etat (MIN la masque),
+        // toujours sans son ni heads-up.
+        nm.createNotificationChannels(listOf(
+            channel(CHANNEL_NET_ID, "Debit reseau"),
+            channel(CHANNEL_RAM_ID, "Memoire RAM"),
+        ))
+    }
+
+    private fun channel(id: String, name: String) =
+        NotificationChannel(id, name, NotificationManager.IMPORTANCE_LOW).apply {
+            setShowBadge(false)
+            setSound(null, null)
+            enableVibration(false)
+            lockscreenVisibility = Notification.VISIBILITY_SECRET
         }
 
-        val notif = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_sys_download)
-            .setContentTitle("NetSpeed")
-            .setPriority(NotificationCompat.PRIORITY_MIN)
-            .setSilent(true)
-            .setShowWhen(false)
-            .setOngoing(true)
-            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-            .build()
-
+    private fun goForeground() {
         ServiceCompat.startForeground(
             this,
-            NOTIF_ID,
-            notif,
+            NOTIF_NET_ID,
+            netNotification(0L, 0L),
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0
         )
     }
 
-    // --- Overlay ------------------------------------------------------------
+    private fun netNotification(down: Long, up: Long): Notification {
+        val (value, unit) = splitRate(down + up)
+        return baseBuilder(CHANNEL_NET_ID)
+            .setSmallIcon(textIcon(value, unit))
+            .setContentTitle("↓ ${fmtRate(down)}   ↑ ${fmtRate(up)}")
+            .setContentText("Debit reseau (total en barre d'etat)")
+            .build()
+    }
 
-    private fun attachOverlay() {
-        val bg = GradientDrawable().apply {
-            setColor(Color.argb(140, 0, 0, 0))
-            cornerRadius = dp(6f)
-        }
-        val tv = TextView(this).apply {
-            setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
-            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-            includeFontPadding = false
-            background = bg
-            setPadding(dp(5f).toInt(), dp(1f).toInt(), dp(5f).toInt(), dp(1f).toInt())
-            text = "· · ·"
-        }
+    private fun ramNotification(used: Long, total: Long): Notification {
+        val pct = if (total > 0) (used * 100.0 / total).roundToInt() else 0
+        return baseBuilder(CHANNEL_RAM_ID)
+            .setSmallIcon(textIcon("$pct%", "RAM"))
+            .setContentTitle("RAM  ${fmtGiB(used)} / ${fmtGiB(total)} Go  ($pct%)")
+            .setContentText("Disponible : ${fmtGiB(total - used)} Go")
+            // Pas une notification de FGS : si le process est tue sans onDestroy, elle
+            // disparait d'elle-meme au lieu de laisser une valeur figee.
+            .setTimeoutAfter(INTERVAL_MS * 5)
+            .build()
+    }
 
-        val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-        else
-            @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
-
-        val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            type,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.START
-            x = dp(OVERLAY_X_DP).toInt()
-            y = dp(OVERLAY_Y_DP).toInt()
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                layoutInDisplayCutoutMode =
-                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+    private fun baseBuilder(channelId: String): Notification.Builder =
+        Notification.Builder(this, channelId)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setShowWhen(false)
+            .setLocalOnly(true)
+            .setVisibility(Notification.VISIBILITY_SECRET)
+            .setCategory(Notification.CATEGORY_STATUS)
+            // Groupes distincts : evite que le systeme regroupe les deux notifications.
+            .setGroup(channelId)
+            .apply {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE)
+                }
             }
-        }
 
-        runCatching { windowManager.addView(tv, params) }
-            .onSuccess { overlay = tv }
+    /**
+     * Icone de barre d'etat sur deux lignes (valeur en haut, unite en bas).
+     * Le systeme n'utilise que le canal alpha et teinte selon le theme.
+     */
+    private fun textIcon(top: String, bottom: String): Icon {
+        val size = (ICON_DP * resources.displayMetrics.density).roundToInt()
+        val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val c = Canvas(bmp)
+        val cx = size / 2f
+        drawFitted(c, top, cx, size * 0.60f, size * 0.62f, size.toFloat())
+        drawFitted(c, bottom, cx, size * 0.98f, size * 0.40f, size.toFloat())
+        return Icon.createWithBitmap(bmp)
+    }
+
+    private fun drawFitted(c: Canvas, s: String, cx: Float, baseline: Float, maxSize: Float, maxWidth: Float) {
+        iconPaint.textSize = maxSize
+        val w = iconPaint.measureText(s)
+        if (w > maxWidth) iconPaint.textSize = maxSize * maxWidth / w
+        c.drawText(s, cx, baseline, iconPaint)
     }
 
     // --- Echantillonnage ----------------------------------------------------
@@ -171,13 +197,15 @@ class BandwidthService : Service() {
     }
 
     private fun sample() {
+        sampleNet()
+        sampleRam()
+    }
+
+    private fun sampleNet() {
         val rx = TrafficStats.getTotalRxBytes()
         val tx = TrafficStats.getTotalTxBytes()
         val unsupported = TrafficStats.UNSUPPORTED.toLong()
-        if (rx == unsupported || tx == unsupported) {
-            overlay?.text = "n/a"
-            return
-        }
+        if (rx == unsupported || tx == unsupported) return
         val now = SystemClock.elapsedRealtime()
         val dt = (now - lastTs).coerceAtLeast(1L)
 
@@ -185,29 +213,44 @@ class BandwidthService : Service() {
         val up = ((tx - lastTx).coerceAtLeast(0L) * 1000.0 / dt).roundToLong()
 
         lastRx = rx; lastTx = tx; lastTs = now
-        overlay?.text = "\u2193${fmt(down)}  \u2191${fmt(up)}"
+        nm.notify(NOTIF_NET_ID, netNotification(down, up))
     }
 
-    private fun fmt(bytesPerSec: Long): String = when {
-        bytesPerSec < 1_000 -> String.format(Locale.US, "%3dB", bytesPerSec)
-        bytesPerSec < 1_000_000 -> String.format(Locale.US, "%3.0fK", bytesPerSec / 1024.0)
-        else -> String.format(Locale.US, "%.1fM", bytesPerSec / 1_048_576.0)
+    private fun sampleRam() {
+        am.getMemoryInfo(memInfo)
+        nm.notify(NOTIF_RAM_ID, ramNotification(memInfo.totalMem - memInfo.availMem, memInfo.totalMem))
     }
 
-    private fun dp(v: Float): Float = v * resources.displayMetrics.density
+    /** Valeur courte (<= 3-4 caracteres) + unite, pour l'icone. */
+    private fun splitRate(bytesPerSec: Long): Pair<String, String> = when {
+        bytesPerSec < 1_000 -> bytesPerSec.toString() to "B/s"
+        bytesPerSec < 1_000 * 1024 -> (bytesPerSec / 1024.0).roundToLong().toString() to "KB/s"
+        else -> {
+            val mb = bytesPerSec / 1_048_576.0
+            (if (mb < 10) String.format(Locale.US, "%.1f", mb) else mb.roundToLong().toString()) to "MB/s"
+        }
+    }
+
+    private fun fmtRate(bytesPerSec: Long): String {
+        val (v, u) = splitRate(bytesPerSec)
+        return "$v $u"
+    }
+
+    private fun fmtGiB(bytes: Long): String =
+        String.format(Locale.US, "%.1f", bytes / 1_073_741_824.0)
 
     companion object {
         const val ACTION_STOP = "mg.acchadu.netspeed.STOP"
-        private const val CHANNEL_ID = "netspeed_fgs"
-        private const val NOTIF_ID = 1001
+        private const val LEGACY_CHANNEL_ID = "netspeed_fgs"
+        private const val CHANNEL_NET_ID = "netspeed_net"
+        private const val CHANNEL_RAM_ID = "netspeed_ram"
+        private const val NOTIF_NET_ID = 1001
+        private const val NOTIF_RAM_ID = 1002
         private const val INTERVAL_MS = 1000L
-        private const val OVERLAY_X_DP = 8f
-        private const val OVERLAY_Y_DP = 2f
+        private const val ICON_DP = 24f
 
         fun start(ctx: Context) {
-            val i = Intent(ctx, BandwidthService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ctx.startForegroundService(i)
-            else ctx.startService(i)
+            ctx.startForegroundService(Intent(ctx, BandwidthService::class.java))
         }
     }
 }
