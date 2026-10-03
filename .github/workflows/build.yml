@@ -33,6 +33,17 @@ jobs:
       - name: Assemble debug APK
         run: ./gradlew --no-daemon assembleDebug
 
+      # Echoue si l'APK n'est pas signe correctement ; affiche certificat et manifeste
+      # effectif (package, versionCode, SDK, testOnly) pour diagnostiquer une installation refusee.
+      - name: Verify APK
+        run: |
+          BT="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
+          APK="$(ls app/build/outputs/apk/debug/*.apk)"
+          ls -l "$APK"
+          "$BT/apksigner" verify --verbose --print-certs "$APK"
+          "$BT/aapt2" dump badging "$APK" | grep -E "^(package|sdkVersion|targetSdkVersion|application|testOnly|native-code|uses-permission)" || true
+          "$BT/aapt2" dump xmltree --file AndroidManifest.xml "$APK" | grep -iE "testOnly|debuggable|minSdk|targetSdk" || true
+
       - uses: actions/upload-artifact@v4
         with:
           name: netspeed-debug-${{ github.sha }}
