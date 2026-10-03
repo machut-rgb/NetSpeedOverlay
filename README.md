@@ -1,6 +1,7 @@
-# NetSpeedOverlay — v1
+# NetSpeedOverlay — v2
 
-Moniteur de débit réseau global (entrant + sortant), sans UI, rendu dans une fenêtre overlay.
+Moniteur de débit réseau global (entrant + sortant) et de RAM, sans UI, affiché dans la
+**barre d'état** (plus d'overlay sur l'écran).
 
 ## Build
 
@@ -14,24 +15,29 @@ minSdk 26 / compileSdk 35. Versions AGP/Kotlin à ajuster selon ton Android Stud
 
 ## Première exécution
 
-1. Lancer l'app → elle ouvre directement le réglage *Affichage par-dessus les autres applications*.
-2. Accorder → retour auto → modale « Le trafic entrant et sortant est maintenant affiché en temps réel. » → OK → l'activity se termine.
-3. L'overlay apparaît en haut à gauche : `↓ 1.2M  ↑ 340K`.
+1. Lancer l'app → Android 13+ demande l'autorisation des notifications.
+2. Accorder → modale « Le débit réseau et la RAM sont maintenant affichés dans la barre d'état. » → OK → l'activity se termine.
+3. Deux icônes apparaissent dans la barre d'état :
+   - **débit** : total ↓+↑ sur deux lignes (`340` / `KB/s`) ; le détail ↓ / ↑ est dans le panneau ;
+   - **RAM** : pourcentage utilisé (`41%` / `RAM`) ; utilisé / total / disponible dans le panneau.
 
-## Supprimer la notification (Android 13+)
+## Fonctionnement : icônes de notification
 
-La notification du foreground service est soumise à `POST_NOTIFICATIONS` depuis Android 13.
-Le code ne demande **jamais** cette permission, donc elle reste refusée par défaut et rien
-n'apparaît dans le panneau. Si ton OEM l'a pré-accordée :
+Une app tierce ne peut pas dessiner directement dans la barre d'état. La seule voie
+supportée est la petite icône d'une notification, générée ici à chaque seconde
+(`Icon.createWithBitmap`). Conséquences :
 
-```bash
-adb shell pm revoke mg.acchadu.netspeed android.permission.POST_NOTIFICATIONS
-```
+- `POST_NOTIFICATIONS` est **obligatoire** sur Android 13+ (sans elle, rien ne s'affiche).
+- Canaux en `IMPORTANCE_LOW` : `MIN` masque l'icône de la barre d'état. Pas de son ni de heads-up.
+- Deux canaux, « Débit réseau » et « Mémoire RAM » : désactiver l'un dans les réglages de
+  notification de l'app masque l'icône correspondante.
+- Le système ne garde que le canal alpha de l'icône et la teinte selon le thème.
+- Certains OEM (MIUI/HyperOS, One UI selon réglages) limitent le nombre d'icônes de
+  notification en barre d'état ou les remplacent par un point : à régler côté système.
+- Écran éteint : l'échantillonnage continue mais aucune notification n'est postée.
 
-Sur Android 8–12, la notification ne peut pas être supprimée par l'app. Le canal est en
-`IMPORTANCE_MIN` + `VISIBILITY_SECRET`, donc elle se replie en bas de la section silencieuse.
-Pour la masquer complètement, désactiver le canal « Moniteur de débit » dans les réglages
-de notification de l'app — le service continue de tourner.
+Le canal v1 (`netspeed_fgs`, `IMPORTANCE_MIN`) est supprimé au démarrage : l'importance
+d'un canal existant ne peut pas être relevée par l'app.
 
 ## Survie du process
 
@@ -50,5 +56,8 @@ toutes interfaces confondues, loopback exclu. Échantillonnage à 1 Hz, delta / 
 `SystemClock.elapsedRealtime()`. Ces compteurs restent accessibles sans permission
 (contrairement aux compteurs per-UID, restreints depuis Android 7).
 
-Limites connues : trafic VPN compté deux fois sur certains devices ; overlay masqué
-au-dessus des écrans marqués `FLAG_SECURE` et de certains plein-écrans.
+RAM : `ActivityManager.getMemoryInfo()` → utilisé = `totalMem - availMem`. `availMem`
+inclut le cache récupérable, donc la valeur est proche de « MemAvailable » de
+`/proc/meminfo`, pas de « MemFree ».
+
+Limites connues : trafic VPN compté deux fois sur certains devices.

@@ -35,12 +35,14 @@ obj/
 # Kotlin/Java
 *.class
 *.jar
+!gradle/wrapper/gradle-wrapper.jar
 *.war
 *.ear
 
 # Signing
 *.jks
 *.keystore
+!app/debug.keystore
 signing-key.properties
 
 # IDE
