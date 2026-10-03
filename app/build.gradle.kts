@@ -15,6 +15,18 @@ android {
         versionName = "2.0"
     }
 
+    // Cle de debug fixe, versionnee : sans elle chaque runner CI signe avec une cle
+    // aleatoire et Android refuse la mise a jour ("Application non installee").
+    // Mots de passe standard du debug Android, aucune valeur de secret.
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
