@@ -2,23 +2,23 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-    <!-- Declaree mais JAMAIS demandee au runtime : sur Android 13+, si POST_NOTIFICATIONS
-         n'est pas accordee, la notification du foreground service n'est pas affichee. -->
+    <!-- Demandee au premier lancement : les valeurs sont rendues en barre d'etat via des
+         icones de notification, invisibles sans cette permission sur Android 13+. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <application
         android:allowBackup="false"
-        android:icon="@android:drawable/stat_sys_download"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:label="NetSpeed"
         android:theme="@style/Theme.NetSpeed.Invisible">
 
         <!-- Activite uniquement presente pour: point d'entree launcher + demande de permission
-             overlay + modale de confirmation. Elle se termine immediatement. -->
+             notifications + modale de confirmation. Elle se termine immediatement. -->
         <activity
             android:name=".BootstrapActivity"
             android:excludeFromRecents="true"
@@ -38,7 +38,7 @@
             android:stopWithTask="false">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="realtime_network_throughput_overlay" />
+                android:value="realtime_network_throughput_and_ram_status_bar" />
         </service>
 
         <receiver
